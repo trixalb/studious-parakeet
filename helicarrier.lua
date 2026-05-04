@@ -1,9 +1,9 @@
--- Helicarrier Flight Controller (ComputerCraft)
--- Corrigido e otimizado para melhor estabilidade de inclinação (pitch)
+-- =========================
+-- HELICARRIER FLIGHT CONTROLLER (PID VERSION)
+-- ComputerCraft
+-- =========================
 
--- =========================
--- Peripheral Setup
--- =========================
+-- ========= PERIPHERALS =========
 local h = peripheral.wrap("top")
 local a = peripheral.wrap("right")
 
@@ -14,29 +14,27 @@ local r1 = peripheral.wrap("redstone_relay_1")
 local l2 = peripheral.wrap("redstone_relay_2")
 local l1 = peripheral.wrap("redstone_relay_3")
 
--- =========================
--- Configurações
--- =========================
+-- ========= CONFIG =========
 local setHeight = 200
 local base_power = 7
 local target_pitch = 0
 
--- PID simplificado para pitch
+-- PID CONFIG
 local pitch_kp = 0.8
+local pitch_ki = 0.03
 local pitch_kd = 0.4
 
--- Potência atual
+local pitch_integral = 0
+local last_pitch = 0
+local integral_limit = 50
+
+-- Turbine powers
 local r2p, r1p, l2p, l1p = 0, 0, 0, 0
 
--- Estado anterior
-local last_pitch = 0
-
--- =========================
--- Funções utilitárias
--- =========================
-local function clamp(value, min, max)
-    if value < min then return min end
-    if value > max then return max end
+-- ========= UTILITIES =========
+local function clamp(value, minVal, maxVal)
+    if value < minVal then return minVal end
+    if value > maxVal then return maxVal end
     return value
 end
 
@@ -62,9 +60,7 @@ local function resetAll()
     updatePower()
 end
 
--- =========================
--- Self Test
--- =========================
+-- ========= SELF TEST =========
 resetAll()
 
 print("All turbines set to 0")
@@ -80,7 +76,7 @@ for _, turbine in ipairs(turbines) do
     sleep(1)
 end
 
-sleep(3)
+sleep(2)
 
 for _, turbine in ipairs(turbines) do
     setTurbine(turbine, 15)
@@ -96,92 +92,143 @@ print("Self test complete, starting normal operation...")
 sleep(2)
 
 term.clear()
-term.setCursorPos(1,1)
+term.setCursorPos(1, 1)
 print("--- HELI CARRIER ---")
 
--- =========================
--- Main Control Loop
--- =========================
+-- ========= MAIN LOOP =========
 while true do
+    -- Receber comandos
     local id, message, protocol = rednet.receive("helicarrier", 0.05)
 
-    -- Leitura de sensores
+    -- ========= SENSOR DATA =========
     local angles = a.getAngles()
     local roll = round(tonumber(angles[1]) or 0, 3)
     local pitch = round(tonumber(angles[2]) or 0, 3)
 
-    -- =========================
-    -- Controle de Pitch (PD)
-    -- =========================
+    -- ========= PID CONTROL =========
     local pitch_error = target_pitch - pitch
-    local pitch_rate = pitch - last_pitch
+
+    -- Integral
+    pitch_integral = pitch_integral + pitch_error
+    pitch_integral = clamp(
+        pitch_integral,
+        -integral_limit,
+        integral_limit
+    )
+
+    -- Derivative
+    local pitch_derivative = pitch - last_pitch
     last_pitch = pitch
 
+    -- PID Output
     local pitch_adjust =
-        (pitch_error * pitch_kp) -
-        (pitch_rate * pitch_kd)
+        (pitch_error * pitch_kp) +
+        (pitch_integral * pitch_ki) -
+        (pitch_derivative * pitch_kd)
 
-    -- Turbinas traseiras corrigem pitch
+    -- ========= POWER DISTRIBUTION =========
+    -- Rear turbines respond stronger
     r2p = clamp(base_power + pitch_adjust, 0, 15)
     l2p = clamp(base_power + pitch_adjust, 0, 15)
 
-    -- Turbinas dianteiras estabilizam
+    -- Front turbines counterbalance
     r1p = clamp(base_power - (pitch_adjust * 0.5), 0, 15)
     l1p = clamp(base_power - (pitch_adjust * 0.5), 0, 15)
 
-    -- =========================
-    -- Comandos remotos
-    -- =========================
-    if message ~= nil then
-        if type(message) == "string" then
-            if message == "shutdown" then
-                print("Shutdown received.")
-                resetAll()
-                break
+    -- ========= REDNET COMMANDS =========
+    if message ~= nil and type(message) == "string" then
 
-            elseif message == "up" then
-                base_power = clamp(base_power + 1, 0, 15)
+        -- Shutdown
+        if message == "shutdown" then
+            print("Shutdown received.")
+            resetAll()
+            break
 
-            elseif message == "down" then
-                base_power = clamp(base_power - 1, 0, 15)
+        -- Power Up
+        elseif message == "up" then
+            base_power = clamp(base_power + 1, 0, 15)
 
-            elseif tonumber(message) then
-                target_pitch = tonumber(message)
+        -- Power Down
+        elseif message == "down" then
+            base_power = clamp(base_power - 1, 0, 15)
+
+        -- Set Target Pitch
+        elseif string.sub(message, 1, 6) == "pitch:" then
+            local newPitch = tonumber(string.sub(message, 7))
+            if newPitch then
+                target_pitch = newPitch
+            end
+
+        -- Set KP
+        elseif string.sub(message, 1, 3) == "KP:" then
+            local newKP = tonumber(string.sub(message, 4))
+            if newKP then
+                pitch_kp = newKP
+            end
+
+        -- Set KI
+        elseif string.sub(message, 1, 3) == "KI:" then
+            local newKI = tonumber(string.sub(message, 4))
+            if newKI then
+                pitch_ki = newKI
+            end
+
+        -- Set KD
+        elseif string.sub(message, 1, 3) == "KD:" then
+            local newKD = tonumber(string.sub(message, 4))
+            if newKD then
+                pitch_kd = newKD
             end
         end
     end
 
-    -- =========================
-    -- Atualizar saída
-    -- =========================
+    -- ========= APPLY POWER =========
     updatePower()
 
-    -- =========================
-    -- Display
-    -- =========================
-    term.setCursorPos(1,3)
+    -- ========= DISPLAY =========
+    term.setCursorPos(1, 3)
     term.clearLine()
     print("Roll: " .. roll)
 
-    term.setCursorPos(1,4)
+    term.setCursorPos(1, 4)
     term.clearLine()
     print("Pitch: " .. pitch)
 
-    term.setCursorPos(1,5)
-    term.clearLine()
-    print("Base Power: " .. base_power)
-
-    term.setCursorPos(1,6)
+    term.setCursorPos(1, 5)
     term.clearLine()
     print("Target Pitch: " .. target_pitch)
 
-    term.setCursorPos(1,7)
+    term.setCursorPos(1, 6)
+    term.clearLine()
+    print("Base Power: " .. base_power)
+
+    term.setCursorPos(1, 7)
+    term.clearLine()
+    print("KP: " .. round(pitch_kp, 3))
+
+    term.setCursorPos(1, 8)
+    term.clearLine()
+    print("KI: " .. round(pitch_ki, 3))
+
+    term.setCursorPos(1, 9)
+    term.clearLine()
+    print("KD: " .. round(pitch_kd, 3))
+
+    term.setCursorPos(1, 10)
+    term.clearLine()
+    print("Err: " .. round(pitch_error, 3))
+
+    term.setCursorPos(1, 11)
+    term.clearLine()
+    print("Int: " .. round(pitch_integral, 3))
+
+    term.setCursorPos(1, 12)
     term.clearLine()
     print(
-        "R2:" .. round(r2p,1) ..
-        " R1:" .. round(r1p,1) ..
-        " L2:" .. round(l2p,1) ..
-        " L1:" .. round(l1p,1)
+        "R2:" .. round(r2p, 1) ..
+        " R1:" .. round(r1p, 1) ..
+        " L2:" .. round(l2p, 1) ..
+        " L1:" .. round(l1p, 1)
     )
 
     sleep(0.05)
